@@ -234,6 +234,31 @@ MC Dropout) all applied to the same BERT encoder.
 We also report published results from \citet{podolskiy2021revisiting} as the
 state-of-the-art reference.
 
+\subsection{Layer-wise Analysis of Mahalanobis Features}
+
+Prior work \cite{podolskiy2021revisiting} applies Mahalanobis Distance
+exclusively to the final hidden layer of the Transformer encoder.
+We investigate whether intermediate layers contain more OOD-discriminative
+structure by sweeping all 13 hidden states of BERT-base
+(embedding layer + 12 Transformer blocks) and fitting a separate
+class-conditional Gaussian at each layer.
+
+Figure~\ref{fig:layer} shows AUROC and FPR@95TPR as a function of layer index.
+Performance is low at early layers, rises steadily through the middle layers,
+and peaks at layer \textbf{YY} (AUROC \textbf{YY.YY\%}, FPR@95TPR \textbf{YY.YY\%}),
+which is not necessarily the last layer.
+This suggests that the optimal feature layer for OOD detection in
+fine-tuned BERT is task-dependent and should be treated as a hyperparameter.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{layer_analysis.pdf}
+  \caption{AUROC and FPR@95TPR of Mahalanobis Distance across all BERT layers.
+           The red dashed line marks the result of \citet{podolskiy2021revisiting}
+           who used only the last layer.}
+  \label{fig:layer}
+\end{figure}
+
 \subsection{Results}
 
 \begin{table}[h]
@@ -274,6 +299,10 @@ confirming that cosine-similarity-based retrieval in the BERT embedding space
 is highly effective for OOD detection. Even the simplest baseline, MSP,
 exceeds the published SotA with AUROC 96.50\%, which we attribute to the
 stronger fine-tuning setup (larger batch, warmup scheduler, gradient clipping).
+
+Our layer-wise analysis reveals that the optimal Mahalanobis feature layer
+is not always the last one, suggesting that layer selection should be
+treated as a hyperparameter in future work.
 
 Future work includes exploring contrastive pre-training objectives,
 score ensembling, and few-shot OOD exposure.

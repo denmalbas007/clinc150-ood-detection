@@ -1,4 +1,4 @@
-"""Mahalanobis Distance OOD detector.
+"""Mahalanobis Distance OOD detector — standard and layer-wise variants.
 
 References:
     Lee et al. (2018). A Simple Unified Framework for Detecting
@@ -14,27 +14,90 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _collect_layer_features(
+    model, loader: DataLoader, layer_idx: int, device: torch.device
+):
+    """Collect [CLS] hidden states from a specific BERT layer for in-domain samples."""
+    model.eval()
+    all_features, all_labels = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            input_ids     = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels         = batch["label"]
+            is_ood         = batch["is_ood"]
+
+            in_mask = ~is_ood
+            if in_mask.sum() == 0:
+                continue
+
+            outputs = model.encoder(
+                input_ids=input_ids[in_mask.to(device)],
+                attention_mask=attention_mask[in_mask.to(device)],
+                output_hidden_states=True,
+            )
+            # hidden_states: tuple of (num_layers+1) tensors, each (B, L, D)
+            # index 0 = embedding layer, 1..12 = transformer layers
+            cls_hidden = outputs.hidden_states[layer_idx][:, 0, :]  # (B, D)
+
+            all_features.append(cls_hidden.cpu())
+            all_labels.append(labels[in_mask])
+
+    return torch.cat(all_features), torch.cat(all_labels)
+
+
+def _fit_gaussian(features: torch.Tensor, labels: torch.Tensor, num_classes: int):
+    """Fit per-class means and shared precision matrix."""
+    hidden_dim = features.shape[1]
+
+    class_means = torch.zeros(num_classes, hidden_dim)
+    for c in range(num_classes):
+        mask = labels == c
+        if mask.sum() > 0:
+            class_means[c] = features[mask].mean(0)
+
+    centered = features - class_means[labels]
+    cov = (centered.T @ centered) / (features.shape[0] - num_classes)
+    cov += 1e-5 * torch.eye(hidden_dim)
+    precision = torch.linalg.inv(cov)
+
+    return class_means, precision
+
+
+def _mahalanobis_scores_from_features(
+    features: torch.Tensor,
+    class_means: torch.Tensor,
+    precision: torch.Tensor,
+) -> torch.Tensor:
+    """Compute min Mahalanobis distance over classes. (B,) → higher = more OOD."""
+    diffs = features.unsqueeze(1) - class_means.unsqueeze(0)   # (B, C, D)
+    md    = torch.einsum("bcd,de,bce->bc", diffs, precision, diffs)  # (B, C)
+    return md.min(dim=-1).values
+
+
+# ---------------------------------------------------------------------------
+# Standard Mahalanobis (last layer, as in Podolskiy 2021)
+# ---------------------------------------------------------------------------
+
 def fit_mahalanobis(
     model, train_loader: DataLoader, num_classes: int, device: torch.device
 ):
-    """Compute per-class means and shared covariance from training features.
-
-    Returns:
-        class_means: (num_classes, hidden_dim)
-        precision:   (hidden_dim, hidden_dim)  — inverse of shared covariance
-    """
+    """Fit Gaussian on last-layer [CLS] features of in-domain training samples."""
     model.eval()
-    all_features = []
-    all_labels = []
+    all_features, all_labels = [], []
 
     with torch.no_grad():
         for batch in train_loader:
-            input_ids = batch["input_ids"].to(device)
+            input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["label"]
-            is_ood = batch["is_ood"]
+            labels         = batch["label"]
+            is_ood         = batch["is_ood"]
 
-            # Only in-domain samples for fitting
             in_mask = ~is_ood
             if in_mask.sum() == 0:
                 continue
@@ -45,27 +108,9 @@ def fit_mahalanobis(
             all_features.append(features.cpu())
             all_labels.append(labels[in_mask])
 
-    all_features = torch.cat(all_features)   # (N, D)
-    all_labels = torch.cat(all_labels)        # (N,)
-    hidden_dim = all_features.shape[1]
-
-    # Per-class means
-    class_means = torch.zeros(num_classes, hidden_dim)
-    class_counts = torch.zeros(num_classes)
-    for c in range(num_classes):
-        mask = all_labels == c
-        if mask.sum() > 0:
-            class_means[c] = all_features[mask].mean(0)
-            class_counts[c] = mask.sum().float()
-
-    # Shared tied covariance
-    centered = all_features - class_means[all_labels]
-    cov = (centered.T @ centered) / (all_features.shape[0] - num_classes)
-    # Regularise for numerical stability
-    cov += 1e-5 * torch.eye(hidden_dim)
-    precision = torch.linalg.inv(cov)
-
-    return class_means, precision
+    all_features = torch.cat(all_features)
+    all_labels   = torch.cat(all_labels)
+    return _fit_gaussian(all_features, all_labels, num_classes)
 
 
 @torch.no_grad()
@@ -76,26 +121,86 @@ def compute_mahalanobis_scores(
     precision: torch.Tensor,
     device: torch.device,
 ) -> torch.Tensor:
-    """Compute Mahalanobis OOD scores (min distance over classes).
-
-    Higher score → more likely OOD.
-    """
+    """Compute Mahalanobis OOD scores using last-layer features."""
     model.eval()
     class_means = class_means.to(device)
-    precision = precision.to(device)
+    precision   = precision.to(device)
     scores = []
 
     for batch in loader:
-        input_ids = batch["input_ids"].to(device)
+        input_ids      = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        features = model.get_features(input_ids, attention_mask)  # (B, D)
-
-        # Mahalanobis distance to each class: (B, C)
-        diffs = features.unsqueeze(1) - class_means.unsqueeze(0)  # (B, C, D)
-        # d^2 = diff @ Sigma^{-1} @ diff^T
-        md = torch.einsum("bcd,de,bce->bc", diffs, precision, diffs)
-        # Min over classes — score: smaller = more in-domain
-        min_dist = md.min(dim=-1).values
-        scores.append(min_dist.cpu())
+        features = model.get_features(input_ids, attention_mask)
+        scores.append(
+            _mahalanobis_scores_from_features(features, class_means, precision).cpu()
+        )
 
     return torch.cat(scores)
+
+
+# ---------------------------------------------------------------------------
+# Layer-wise Mahalanobis analysis  (our novel contribution)
+# ---------------------------------------------------------------------------
+
+def layer_wise_mahalanobis(
+    model,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    is_ood_gt,
+    num_classes: int,
+    device: torch.device,
+    num_layers: int = 12,
+):
+    """Run Mahalanobis on every BERT layer (1..num_layers+1) and return metrics.
+
+    Layer 0  = embedding layer
+    Layer 1  = output of transformer block 1
+    ...
+    Layer 12 = output of transformer block 12  (= last layer, used by Podolskiy)
+
+    Returns:
+        layer_scores : dict {layer_idx -> np.ndarray of OOD scores on test set}
+        layer_metrics: dict {layer_idx -> {'AUROC', 'FPR@95TPR', 'AUPR'}}
+    """
+    from metrics import compute_all_metrics
+
+    model.eval()
+    layer_scores  = {}
+    layer_metrics = {}
+
+    for layer_idx in range(1, num_layers + 2):   # 1..13 (BERT base has 12 blocks)
+        print(f"  Layer {layer_idx}/{num_layers + 1} ...", end=" ")
+
+        # --- fit ---
+        train_feats, train_labels = _collect_layer_features(
+            model, train_loader, layer_idx, device
+        )
+        class_means, precision = _fit_gaussian(train_feats, train_labels, num_classes)
+        class_means = class_means.to(device)
+        precision   = precision.to(device)
+
+        # --- score test set ---
+        scores = []
+        with torch.no_grad():
+            for batch in test_loader:
+                input_ids      = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+
+                outputs = model.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+                cls_hidden = outputs.hidden_states[layer_idx][:, 0, :]
+                s = _mahalanobis_scores_from_features(cls_hidden, class_means, precision)
+                scores.append(s.cpu())
+
+        scores_np = torch.cat(scores).numpy()
+        metrics   = compute_all_metrics(scores_np, is_ood_gt)
+
+        layer_scores[layer_idx]  = scores_np
+        layer_metrics[layer_idx] = metrics
+
+        print(f"AUROC={metrics['AUROC']:.4f}  FPR@95={metrics['FPR@95TPR']:.4f}")
+
+    return layer_scores, layer_metrics
