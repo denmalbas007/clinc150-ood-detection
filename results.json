@@ -1,0 +1,32 @@
+{
+  "MSP": {
+    "AUROC": 0.9650,
+    "FPR@95TPR": 0.1413,
+    "AUPR": 0.8724
+  },
+  "Energy": {
+    "AUROC": 0.9715,
+    "FPR@95TPR": 0.1136,
+    "AUPR": 0.8963
+  },
+  "Mahalanobis": {
+    "AUROC": 0.9759,
+    "FPR@95TPR": 0.0927,
+    "AUPR": 0.9098
+  },
+  "KNN (k=1)": {
+    "AUROC": 0.9758,
+    "FPR@95TPR": 0.1013,
+    "AUPR": 0.9033
+  },
+  "KNN (k=10)": {
+    "AUROC": 0.9735,
+    "FPR@95TPR": 0.1053,
+    "AUPR": 0.8988
+  },
+  "MC Dropout": {
+    "AUROC": 0.9687,
+    "FPR@95TPR": 0.1258,
+    "AUPR": 0.8854
+  }
+}
