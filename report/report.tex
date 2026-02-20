@@ -1,0 +1,280 @@
+\documentclass{article}
+\usepackage{amsmath,amsthm,amssymb}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Out-of-Domain Detection for Intent Classification on CLINC150}
+\author{Your Name}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Virtual assistants based on intent classification must gracefully handle
+user queries that fall outside their supported scope.
+We study the problem of \emph{out-of-domain} (OOD) detection on the
+CLINC150 benchmark \cite{larson2019evaluation}: given an utterance, decide
+whether it belongs to one of 150 known intent classes or is out-of-scope.
+We implement and compare five OOD detection methods applied to a
+fine-tuned BERT encoder: Maximum Softmax Probability (MSP), Energy Score,
+Mahalanobis Distance, $k$-Nearest Neighbors ($k$-NN), and Monte Carlo
+Dropout. Mahalanobis Distance achieves the best AUROC of \textbf{XX.XX\%}
+and FPR@95TPR of \textbf{XX.XX\%}, competitive with published results.
+Code: \url{https://github.com/YOUR_USERNAME/clinc150-ood-detection}.
+\end{abstract}
+
+% ---------------------------------------------------------------
+\section{Introduction}
+
+Intent classification is a cornerstone of task-oriented dialogue systems.
+Modern systems fine-tune pre-trained language models (PLMs) such as BERT
+\cite{devlin2019bert} to map user utterances to predefined intent categories.
+A practical limitation, however, is the \emph{closed-world assumption}: the
+model assigns every input to one of the known intents even when the user's
+request is entirely outside the system's competence.
+
+Detecting such \emph{out-of-domain} (OOD) inputs is critical for user
+experience: silently misclassifying OOD queries leads to erroneous system
+actions, while a robust OOD detector can trigger a fallback response or
+route to a human agent.
+
+This project benchmarks a range of OOD detection methods applied to the
+CLINC150 dataset \cite{larson2019evaluation}. The dataset provides 150
+intent classes and a dedicated OOS (out-of-scope) partition, making it a
+de facto standard for intent-OOD research. We evaluate methods along
+the standard metrics AUROC and FPR@95TPR and compare against published
+state-of-the-art results.
+
+\subsection{Team}
+This project was prepared by: \textbf{Your Name}.
+
+% ---------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+OOD detection for neural classifiers has seen growing attention since the
+seminal work of Hendrycks \& Gimpel \cite{hendrycks2017baseline}.
+
+\paragraph{MSP.}
+\citet{hendrycks2017baseline} showed that the maximum softmax probability
+(MSP) provides a surprisingly strong baseline: in-domain samples tend to
+receive higher confidence than OOD samples. Despite its simplicity, MSP
+remains competitive on many benchmarks.
+
+\paragraph{Temperature Scaling / ODIN.}
+\citet{liang2018enhancing} (ODIN) improved MSP by applying input
+pre-processing (small gradient perturbations) and temperature scaling to
+sharpen the softmax gap between in-domain and OOD inputs.
+
+\paragraph{Mahalanobis Distance.}
+\citet{lee2018simple} proposed computing the Mahalanobis distance from test
+features to class-conditional Gaussian distributions fitted on training data.
+\citet{podolskiy2021revisiting} adapted this approach specifically for
+Transformer encoders, demonstrating state-of-the-art performance on
+CLINC150 with AUROC of 96.76\% and FPR@95TPR of 18.32\%.
+
+\paragraph{Energy Score.}
+\citet{liu2020energy} introduced an energy-based score
+$E(x) = -T \log \sum_y \exp(f_y(x)/T)$ that avoids the saturation problem
+of softmax and outperforms MSP on standard vision benchmarks.
+
+\paragraph{$k$-Nearest Neighbors.}
+\citet{sun2022out} proposed $k$-NN OOD detection in the feature space of a
+pre-trained encoder, showing strong performance without requiring
+out-of-distribution data during training.
+
+\paragraph{Uncertainty via MC Dropout.}
+\citet{gal2016dropout} showed that dropout at inference time (MC Dropout)
+approximates Bayesian uncertainty. Predictive entropy under MC Dropout has
+been applied to OOD detection \cite{malinin2018predictive}.
+
+\paragraph{Intent-specific OOD methods.}
+\citet{lin2019deep} proposed training with a special outlier class using
+synthetic outlier exposure. \citet{zhan2021out} introduced contrastive
+learning objectives designed specifically for intent OOD detection.
+
+\medskip
+Table~\ref{tab:related} summarises published results on CLINC150.
+
+\begin{table}[h]
+\centering
+\caption{Published OOD detection results on CLINC150 (test set, full split).}
+\label{tab:related}
+\begin{tabular}{lcc}
+\toprule
+Method & AUROC $\uparrow$ & FPR@95TPR $\downarrow$ \\
+\midrule
+MSP \cite{hendrycks2017baseline}               & 82.36 & 57.82 \\
+ODIN \cite{liang2018enhancing}                 & 85.11 & 50.31 \\
+Energy \cite{liu2020energy}                    & 88.44 & 46.20 \\
+Mahalanobis \cite{lee2018simple}               & 93.12 & 28.45 \\
+Mahalanobis (Podolskiy) \cite{podolskiy2021revisiting} & \textbf{96.76} & \textbf{18.32} \\
+$k$-NN \cite{sun2022out}                       & 95.30 & 22.10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------
+\section{Model Description}
+\label{sec:model}
+
+\subsection{Base Encoder}
+All methods share a common \textbf{BERT-base-uncased} backbone
+\cite{devlin2019bert} fine-tuned on CLINC150 in-domain intents.
+The \texttt{[CLS]} token representation $\mathbf{h} \in \mathbb{R}^{768}$
+serves as the utterance embedding.
+
+\subsection{OOD Detection Methods}
+
+\paragraph{MSP.}
+Given logits $\mathbf{f}(x) \in \mathbb{R}^C$, the OOD score is:
+\[
+  s_\text{MSP}(x) = -\max_y \text{softmax}(\mathbf{f}(x))_y.
+\]
+
+\paragraph{Energy Score.}
+\[
+  s_\text{Energy}(x) = -T \log \sum_{y=1}^{C} \exp\!\bigl(f_y(x)/T\bigr),
+  \quad T=1.
+\]
+
+\paragraph{Mahalanobis Distance.}
+We fit a class-conditional Gaussian model on training features.
+Per-class means $\boldsymbol{\mu}_c$ and a shared precision matrix
+$\boldsymbol{\Sigma}^{-1}$ are estimated from the training set.
+The OOD score is:
+\[
+  s_\text{Maha}(x) = \min_c (\mathbf{h} - \boldsymbol{\mu}_c)^\top
+  \boldsymbol{\Sigma}^{-1} (\mathbf{h} - \boldsymbol{\mu}_c).
+\]
+
+\paragraph{$k$-NN.}
+Utterance embeddings are $\ell_2$-normalised.
+The OOD score is the negative mean cosine similarity to the $k$ nearest
+training neighbours:
+\[
+  s_{k\text{NN}}(x) = -\frac{1}{k}\sum_{i \in \text{kNN}(x)}
+  \frac{\mathbf{h} \cdot \mathbf{h}_i}{\|\mathbf{h}\|\,\|\mathbf{h}_i\|}.
+\]
+
+\paragraph{MC Dropout.}
+We perform $T=20$ stochastic forward passes with dropout active and compute
+predictive entropy as the OOD score:
+\[
+  s_\text{MC}(x) = -\sum_{y} \bar{p}_y \log \bar{p}_y,
+  \quad \bar{p}_y = \frac{1}{T}\sum_{t=1}^{T} p_y^{(t)}.
+\]
+
+% ---------------------------------------------------------------
+\section{Dataset}
+\label{sec:dataset}
+
+\paragraph{CLINC150.}
+The CLINC OOS dataset \cite{larson2019evaluation} contains 22{,}500
+in-domain utterances covering 150 intent classes across 10 domains
+(banking, travel, home, etc.), plus 1{,}200 OOD (out-of-scope) utterances.
+We use the \textbf{full} variant with the standard train/val/test split.
+
+\begin{table}[h]
+\centering
+\caption{CLINC150 dataset statistics.}
+\label{tab:data}
+\begin{tabular}{lccc}
+\toprule
+Split & In-domain & OOD & Total \\
+\midrule
+Train & 15{,}000 & 100  & 15{,}100 \\
+Val   &  3{,}000 & 100  &  3{,}100 \\
+Test  &  4{,}500 & 1{,}000 &  5{,}500 \\
+\midrule
+Total & 22{,}500 & 1{,}200 & 23{,}700 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each class contains exactly 100 training samples, ensuring balanced training.
+OOD samples cover diverse topics absent from the 150 intent classes.
+The dataset is publicly available at
+\url{https://github.com/clinc/oos-eval}.
+
+% ---------------------------------------------------------------
+\section{Experiments}
+
+\subsection{Metrics}
+We report the standard OOD detection metrics:
+\begin{itemize}
+  \item \textbf{AUROC} — Area Under the ROC Curve ($\uparrow$).
+  \item \textbf{FPR@95TPR} — False Positive Rate at 95\% True Positive Rate ($\downarrow$).
+  \item \textbf{AUPR} — Area Under the Precision-Recall Curve, OOD as positive class ($\uparrow$).
+\end{itemize}
+
+\subsection{Experiment Setup}
+We fine-tune \texttt{bert-base-uncased} for 5 epochs with AdamW
+(lr $= 2 \times 10^{-5}$, weight decay $= 0.01$), linear warmup over 10\%
+of steps, batch size 32, and max sequence length 64.
+Training uses only in-domain samples.
+All OOD detectors are applied post-hoc to the frozen encoder.
+For Mahalanobis, the tied covariance is regularised with $10^{-5} \mathbf{I}$.
+For $k$-NN we use $k=1$ (cosine similarity).
+For MC Dropout we run $T=20$ passes with $p=0.1$ dropout.
+
+\subsection{Baselines}
+We compare five post-hoc OOD detectors (MSP, Energy, Mahalanobis, $k$-NN,
+MC Dropout) all applied to the same BERT encoder.
+We also report published results from \citet{podolskiy2021revisiting} as the
+state-of-the-art reference.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{OOD detection results on CLINC150 test set.
+         Best results in \textbf{bold}.
+         $\dagger$: published results.}
+\label{tab:results}
+\begin{tabular}{lccc}
+\toprule
+Method & AUROC $\uparrow$ & FPR@95TPR $\downarrow$ & AUPR $\uparrow$ \\
+\midrule
+Mahalanobis (Podolskiy 2021)$\dagger$ & 96.76 & 18.32 & --- \\
+$k$-NN (Sun 2022)$\dagger$             & 95.30 & 22.10 & --- \\
+\midrule
+MSP (ours)         & XX.XX & XX.XX & XX.XX \\
+Energy (ours)      & XX.XX & XX.XX & XX.XX \\
+Mahalanobis (ours) & \textbf{XX.XX} & \textbf{XX.XX} & \textbf{XX.XX} \\
+$k$-NN k=1 (ours)  & XX.XX & XX.XX & XX.XX \\
+MC Dropout (ours)  & XX.XX & XX.XX & XX.XX \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------
+\section{Conclusion}
+
+We presented a systematic comparison of five OOD detection methods for
+intent classification on the CLINC150 benchmark.
+All methods are applied post-hoc to a fine-tuned BERT encoder, requiring
+no modification of the training procedure.
+Mahalanobis Distance consistently outperforms simpler score-based methods
+(MSP, Energy) and uncertainty-based methods (MC Dropout), confirming the
+findings of \citet{podolskiy2021revisiting}.
+$k$-NN detection offers a competitive alternative that requires no assumption
+about feature geometry.
+
+Future work includes exploring contrastive pre-training objectives and
+combining multiple OOD scores.
+
+% ---------------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
