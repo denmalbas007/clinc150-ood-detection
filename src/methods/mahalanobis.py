@@ -168,8 +168,8 @@ def layer_wise_mahalanobis(
     layer_scores  = {}
     layer_metrics = {}
 
-    for layer_idx in range(1, num_layers + 2):   # 1..13 (BERT base has 12 blocks)
-        print(f"  Layer {layer_idx}/{num_layers + 1} ...", end=" ")
+    for layer_idx in range(1, num_layers + 1):   # 1..12 (BERT base: hidden_states[0..12])
+        print(f"  Layer {layer_idx}/{num_layers} ...", end=" ")
 
         # --- fit ---
         train_feats, train_labels = _collect_layer_features(

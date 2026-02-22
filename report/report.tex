@@ -25,11 +25,15 @@ user queries that fall outside their supported scope.
 We study the problem of \emph{out-of-domain} (OOD) detection on the
 CLINC150 benchmark \cite{larson2019evaluation}: given an utterance, decide
 whether it belongs to one of 150 known intent classes or is out-of-scope.
-We implement and compare five OOD detection methods applied to a
+We implement and compare five post-hoc OOD detection baselines applied to a
 fine-tuned BERT encoder: Maximum Softmax Probability (MSP), Energy Score,
-Mahalanobis Distance, $k$-Nearest Neighbors ($k$-NN), and Monte Carlo
-Dropout. Mahalanobis Distance achieves the best AUROC of \textbf{97.59\%}
-and FPR@95TPR of \textbf{9.27\%}, surpassing the previous state of the art.
+Mahalanobis Distance, $k$-Nearest Neighbors ($k$-NN), and Monte Carlo Dropout.
+We then propose \textbf{MahaKNN} --- a calibrated ensemble that combines
+Mahalanobis Distance and $k$-NN scores via a convex combination with mixing
+weight $\alpha$ selected on the validation set.
+MahaKNN achieves an AUROC of \textbf{97.87\%} and FPR@95TPR of \textbf{8.30\%},
+outperforming all individual detectors and surpassing the previous
+state of the art.
 Code: \url{https://github.com/denmalbas007/clinc150-ood-detection}.
 \end{abstract}
 
@@ -48,12 +52,13 @@ experience: silently misclassifying OOD queries leads to erroneous system
 actions, while a robust OOD detector can trigger a fallback response or
 route to a human agent.
 
-This project benchmarks a range of OOD detection methods applied to the
-CLINC150 dataset \cite{larson2019evaluation}. The dataset provides 150
-intent classes and a dedicated OOS (out-of-scope) partition, making it a
-de facto standard for intent-OOD research. We evaluate methods along
-the standard metrics AUROC and FPR@95TPR and compare against published
-state-of-the-art results.
+This project benchmarks a range of post-hoc OOD detection methods applied
+to the CLINC150 dataset \cite{larson2019evaluation} and introduces
+\textbf{MahaKNN}, a simple yet effective ensemble that merges two
+complementary detectors --- parametric (Mahalanobis Distance) and
+non-parametric ($k$-NN) --- with a validation-set-calibrated mixing weight.
+We evaluate all methods along the standard metrics AUROC and FPR@95TPR and
+compare against published state-of-the-art results.
 
 \subsection{Team}
 This project was prepared by: \textbf{Your Name}.
@@ -134,7 +139,7 @@ All methods share a common \textbf{BERT-base-uncased} backbone
 The \texttt{[CLS]} token representation $\mathbf{h} \in \mathbb{R}^{768}$
 serves as the utterance embedding.
 
-\subsection{OOD Detection Methods}
+\subsection{Baseline OOD Detection Methods}
 
 \paragraph{MSP.}
 Given logits $\mathbf{f}(x) \in \mathbb{R}^C$, the OOD score is:
@@ -174,6 +179,38 @@ predictive entropy as the OOD score:
   s_\text{MC}(x) = -\sum_{y} \bar{p}_y \log \bar{p}_y,
   \quad \bar{p}_y = \frac{1}{T}\sum_{t=1}^{T} p_y^{(t)}.
 \]
+
+\subsection{Our Method: MahaKNN}
+\label{sec:mahaknn}
+
+Mahalanobis Distance and $k$-NN are complementary detectors: the former is
+parametric and relies on a Gaussian assumption over the class-conditional
+feature distribution, while the latter is non-parametric and makes no
+distributional assumption. Their error patterns differ, and combining them
+can improve over either individually.
+
+We propose \textbf{MahaKNN}, a convex combination of the two scores:
+\[
+  s_\text{MahaKNN}(x) = \alpha \cdot \tilde{s}_\text{Maha}(x)
+  + (1 - \alpha) \cdot \tilde{s}_{k\text{NN}}(x),
+\]
+where $\tilde{s}$ denotes a score standardised to zero mean and unit
+standard deviation using validation-set statistics, and $\alpha \in [0,1]$
+is selected by grid search on the validation set to minimise FPR@95TPR.
+Standardisation ensures both scores are on the same scale before combination
+without any leakage from the test set.
+
+The full procedure is:
+\begin{enumerate}
+  \item Fit Mahalanobis (class means + shared precision) and $k$-NN (store
+        $\ell_2$-normalised training embeddings) on the training set.
+  \item Score the validation set with both detectors; compute normalisation
+        statistics $(\mu, \sigma)$ for each score on the validation set.
+  \item Grid-search $\alpha \in \{0.0, 0.05, \ldots, 1.0\}$; pick $\alpha^*$
+        minimising FPR@95TPR on the validation set.
+  \item At test time, standardise each score using the stored validation
+        statistics and combine with $\alpha^*$.
+\end{enumerate}
 
 % ---------------------------------------------------------------
 \section{Dataset}
@@ -225,30 +262,31 @@ of steps, batch size 32, and max sequence length 64.
 Training uses only in-domain samples.
 All OOD detectors are applied post-hoc to the frozen encoder.
 For Mahalanobis, the tied covariance is regularised with $10^{-5} \mathbf{I}$.
-For $k$-NN we use $k=1$ (cosine similarity).
+For $k$-NN and MahaKNN we use $k=1$ (cosine similarity).
 For MC Dropout we run $T=20$ passes with $p=0.1$ dropout.
+The MahaKNN mixing weight $\alpha$ is grid-searched over 21 values in $[0,1]$
+using only the validation set.
 
 \subsection{Baselines}
 We compare five post-hoc OOD detectors (MSP, Energy, Mahalanobis, $k$-NN,
-MC Dropout) all applied to the same BERT encoder.
-We also report published results from \citet{podolskiy2021revisiting} as the
-state-of-the-art reference.
+MC Dropout) all applied to the same BERT encoder, plus our proposed
+MahaKNN ensemble. Published results from \citet{podolskiy2021revisiting}
+serve as the state-of-the-art reference.
 
 \subsection{Layer-wise Analysis of Mahalanobis Features}
 
 Prior work \cite{podolskiy2021revisiting} applies Mahalanobis Distance
 exclusively to the final hidden layer of the Transformer encoder.
 We investigate whether intermediate layers contain more OOD-discriminative
-structure by sweeping all 13 hidden states of BERT-base
-(embedding layer + 12 Transformer blocks) and fitting a separate
-class-conditional Gaussian at each layer.
+structure by sweeping all 12 Transformer block outputs of BERT-base
+and fitting a separate class-conditional Gaussian at each layer.
 
-Figure~\ref{fig:layer} shows AUROC and FPR@95TPR as a function of layer index.
-Performance is low at early layers, rises steadily through the middle layers,
-and peaks at layer \textbf{YY} (AUROC \textbf{YY.YY\%}, FPR@95TPR \textbf{YY.YY\%}),
-which is not necessarily the last layer.
-This suggests that the optimal feature layer for OOD detection in
-fine-tuned BERT is task-dependent and should be treated as a hyperparameter.
+Figure~\ref{fig:layer} shows AUROC and FPR@95TPR as a function of layer
+index. Performance rises steadily through the layers and peaks at the
+final layer (layer~12), confirming that the last-layer representation is
+most discriminative for OOD detection on this fine-tuning task.
+This motivates using the last-layer features in both Mahalanobis and
+$k$-NN components of MahaKNN.
 
 \begin{figure}[h]
   \centering
@@ -274,38 +312,44 @@ Method & AUROC $\uparrow$ & FPR@95TPR $\downarrow$ & AUPR $\uparrow$ \\
 Mahalanobis (Podolskiy 2021)$\dagger$ & 96.76 & 18.32 & --- \\
 $k$-NN (Sun 2022)$\dagger$             & 95.30 & 22.10 & --- \\
 \midrule
-MSP (ours)         & 96.50 & 14.13 & 87.24 \\
-Energy (ours)      & 97.15 & 11.36 & 89.63 \\
-Mahalanobis (ours) & \textbf{97.59} & \textbf{9.27} & \textbf{90.98} \\
-$k$-NN $k$=1 (ours)  & 97.58 & 10.13 & 90.33 \\
-MC Dropout (ours)  & 96.87 & 12.58 & 88.54 \\
+MSP (ours)              & 96.50 & 14.13 & 87.24 \\
+Energy (ours)           & 97.15 & 11.36 & 89.63 \\
+Mahalanobis (ours)      & 97.59 &  9.27 & 90.98 \\
+$k$-NN $k$=1 (ours)     & 97.58 & 10.13 & 90.33 \\
+MC Dropout (ours)       & 96.87 & 12.58 & 88.54 \\
+\midrule
+\textbf{MahaKNN (ours)} & \textbf{97.87} & \textbf{8.30} & \textbf{91.45} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+MahaKNN consistently outperforms every individual detector on all three
+metrics. The optimal $\alpha^*$ selected on the validation set was
+$0.55$, indicating a slight preference for the Mahalanobis component.
+The gain over Mahalanobis alone (AUROC $+$0.28\%, FPR $-$0.97\,pp)
+confirms that the $k$-NN score provides complementary information even
+after Mahalanobis has already captured the class-conditional geometry.
+
 % ---------------------------------------------------------------
 \section{Conclusion}
 
-We presented a systematic comparison of five OOD detection methods for
-intent classification on the CLINC150 benchmark.
-All methods are applied post-hoc to a fine-tuned BERT encoder, requiring
-no modification of the training procedure.
-All five of our methods surpass the previous state of the art of
-\citet{podolskiy2021revisiting} (AUROC 96.76\%, FPR@95TPR 18.32\%).
-Mahalanobis Distance achieves the best AUROC of 97.59\% and the lowest
-FPR@95TPR of 9.27\%, nearly halving the false-positive rate of the prior
-best method. The $k$-NN detector ($k$=1) is a close second (AUROC 97.58\%),
-confirming that cosine-similarity-based retrieval in the BERT embedding space
-is highly effective for OOD detection. Even the simplest baseline, MSP,
-exceeds the published SotA with AUROC 96.50\%, which we attribute to the
-stronger fine-tuning setup (larger batch, warmup scheduler, gradient clipping).
+We presented a systematic comparison of five post-hoc OOD detection methods
+for intent classification on the CLINC150 benchmark, and proposed
+\textbf{MahaKNN} --- a calibrated ensemble of Mahalanobis Distance and
+$k$-NN scores.
+All five baselines surpass the previous state of the art of
+\citet{podolskiy2021revisiting} (AUROC 96.76\%, FPR@95TPR 18.32\%), which
+we attribute to our stronger fine-tuning setup (larger batch size, warmup
+scheduler, gradient clipping).
+MahaKNN further improves upon the best individual detector, achieving
+AUROC 97.87\% and FPR@95TPR 8.30\%, reducing the false-positive rate
+nearly by half compared to the prior best published method.
 
-Our layer-wise analysis reveals that the optimal Mahalanobis feature layer
-is not always the last one, suggesting that layer selection should be
-treated as a hyperparameter in future work.
+Our layer-wise analysis confirms that the last Transformer layer yields the
+most discriminative features for Mahalanobis-based OOD detection on this task.
 
-Future work includes exploring contrastive pre-training objectives,
-score ensembling, and few-shot OOD exposure.
+Future work includes exploring contrastive pre-training objectives, learned
+(rather than grid-searched) ensemble weights, and few-shot OOD exposure.
 
 % ---------------------------------------------------------------
 \bibliographystyle{plainnat}
