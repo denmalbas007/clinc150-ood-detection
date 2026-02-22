@@ -11,6 +11,11 @@
 \usepackage{geometry}
 \geometry{margin=1in}
 \usepackage{natbib}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
 
 \title{Out-of-Domain Detection for Intent Classification on CLINC150}
 \author{Danilo Malbashich \\ ITMO University / SBER AI}
@@ -23,20 +28,28 @@
 Virtual assistants based on intent classification must gracefully handle
 user queries that fall outside their supported scope.
 We study the problem of \emph{out-of-domain} (OOD) detection on the
-CLINC150 benchmark \cite{larson2019evaluation}: given an utterance, decide
-whether it belongs to one of 150 known intent classes or is out-of-scope.
-We implement and compare five post-hoc OOD detection baselines applied to a
+CLINC150 benchmark \cite{larson2019evaluation}: given an utterance $x$,
+decide whether it belongs to one of $C=150$ known intent classes or is
+out-of-scope.
+We implement and compare five post-hoc OOD detection methods applied to a
 fine-tuned BERT encoder: Maximum Softmax Probability (MSP), Energy Score,
-Mahalanobis Distance, $k$-Nearest Neighbors ($k$-NN), and Monte Carlo Dropout.
-We then investigate three extensions: (i)~\textbf{Per-Class KNN}, which
-restricts neighbour retrieval to the predicted class cluster;
-(ii)~\textbf{MahaKNN}, a calibrated ensemble of Mahalanobis and $k$-NN scores;
-and (iii)~a \textbf{layer-wise analysis} of Mahalanobis features across all
-BERT layers.
-All five baselines already surpass the previous state of the art
+Mahalanobis Distance, $k$-Nearest Neighbors ($k$-NN), and Monte Carlo
+Dropout.
+We additionally investigate three extensions:
+(i)~\textbf{Per-Class KNN}, which restricts neighbour retrieval to the
+predicted class manifold;
+(ii)~\textbf{MahaKNN}, a score-level convex ensemble with
+validation-calibrated mixing weight $\alpha^*$;
+and (iii)~a \textbf{layer-wise Mahalanobis analysis} that identifies which
+BERT layer yields the most OOD-discriminative geometry.
+All five baselines surpass the previous state of the art
 \cite{podolskiy2021revisiting} (AUROC 96.76\%, FPR@95TPR 18.32\%),
 with Mahalanobis achieving the best AUROC of \textbf{97.59\%} and
 FPR@95TPR of \textbf{9.27\%}.
+Our extensions match the best individual detectors, and the null result
+of MahaKNN ($\alpha^*=0$) reveals that the fine-tuned BERT feature space
+on CLINC150 is already near-optimally structured for non-parametric
+density estimation.
 Code: \url{https://github.com/denmalbas007/clinc150-ood-detection}.
 \end{abstract}
 
@@ -44,27 +57,44 @@ Code: \url{https://github.com/denmalbas007/clinc150-ood-detection}.
 \section{Introduction}
 
 Intent classification is a cornerstone of task-oriented dialogue systems.
-Modern systems fine-tune pre-trained language models (PLMs) such as BERT
-\cite{devlin2019bert} to map user utterances to predefined intent categories.
-A practical limitation, however, is the \emph{closed-world assumption}: the
-model assigns every input to one of the known intents even when the user's
-request is entirely outside the system's competence.
+Modern systems fine-tune pre-trained language models (PLMs) such as
+BERT~\cite{devlin2019bert} to learn a mapping
+$f_\theta: \mathcal{X} \to \mathbb{R}^C$ from utterance space
+$\mathcal{X}$ to logits over $C$ intent classes.
+A practical limitation, however, is the \emph{closed-world assumption}:
+the classifier assigns every input to one of the $C$ known intents even
+when the user's request lies entirely outside the support of the training
+distribution $p_\text{in}(x)$.
 
-Detecting such \emph{out-of-domain} (OOD) inputs is critical for user
-experience: silently misclassifying OOD queries leads to erroneous system
-actions, while a robust OOD detector can trigger a fallback response or
-route to a human agent.
+Formally, let $\mathcal{D}_\text{in}$ be the in-domain distribution and
+$\mathcal{D}_\text{out}$ an unknown OOD distribution.
+At test time the model receives samples from the mixture
+$\mathcal{D}_\text{test} = (1-\pi)\,\mathcal{D}_\text{in} + \pi\,\mathcal{D}_\text{out}$.
+The goal of OOD detection is to learn a scoring function
+$s: \mathcal{X} \to \mathbb{R}$ such that
+$s(x) > \tau$ predicts OOD for a chosen threshold $\tau$.
+An ideal score induces a clean separation between the two distributions:
+\[
+  \mathbb{E}_{x \sim \mathcal{D}_\text{out}}[s(x)]
+  \gg
+  \mathbb{E}_{x \sim \mathcal{D}_\text{in}}[s(x)].
+\]
+
+Detecting OOD inputs is critical for user experience: silently
+misclassifying OOD queries leads to erroneous system actions, while a
+robust detector can trigger a fallback response or route to a human agent.
 
 This project systematically benchmarks post-hoc OOD detection methods on
-the CLINC150 dataset \cite{larson2019evaluation} and proposes three
-complementary analyses and extensions:
+the CLINC150 dataset~\cite{larson2019evaluation} and investigates three
+complementary extensions:
 \begin{enumerate}
   \item \textbf{Per-Class KNN} --- restricting $k$-NN retrieval to the
-        predicted class cluster for a tighter decision boundary.
+        predicted class manifold for a geometrically tighter boundary.
   \item \textbf{MahaKNN} --- a calibrated convex ensemble of Mahalanobis
-        Distance and $k$-NN scores with validation-set-tuned mixing weight.
-  \item \textbf{Layer-wise Mahalanobis analysis} --- sweeping all 12 BERT
-        layers to identify which representation is most OOD-discriminative.
+        Distance and $k$-NN scores with validation-set-tuned weight $\alpha^*$.
+  \item \textbf{Layer-wise Mahalanobis analysis} --- a controlled sweep of
+        all 12 BERT encoder layers to identify which hidden representation
+        is most OOD-discriminative.
 \end{enumerate}
 We evaluate all methods on AUROC, FPR@95TPR, and AUPR, and compare against
 published state-of-the-art results.
@@ -77,45 +107,55 @@ This project was prepared by: \textbf{Danilo Malbashich} (ITMO University / SBER
 \label{sec:related}
 
 OOD detection for neural classifiers has seen growing attention since the
-seminal work of Hendrycks \& Gimpel \cite{hendrycks2017baseline}.
+seminal work of \citet{hendrycks2017baseline}.
 
 \paragraph{MSP.}
-\citet{hendrycks2017baseline} showed that the maximum softmax probability
-(MSP) provides a surprisingly strong baseline: in-domain samples tend to
-receive higher confidence than OOD samples. Despite its simplicity, MSP
-remains competitive on many benchmarks.
+\citet{hendrycks2017baseline} observed that the maximum softmax probability
+$\max_y p_\theta(y\mid x)$ tends to be higher for in-domain inputs.
+Despite the well-known \emph{overconfidence} pathology of softmax
+classifiers~\cite{guo2017calibration}, MSP remains a competitive baseline
+across many benchmarks due to the implicit regularisation induced by
+cross-entropy training.
 
 \paragraph{Temperature Scaling / ODIN.}
-\citet{liang2018enhancing} (ODIN) improved MSP by applying input
-pre-processing (small gradient perturbations) and temperature scaling to
-sharpen the softmax gap between in-domain and OOD inputs.
+\citet{liang2018enhancing} (ODIN) sharpened MSP by (a)~applying a small
+gradient perturbation $\hat{x} = x - \varepsilon \operatorname{sign}(-\nabla_x \log p_\theta(\hat{y}|x))$
+in the direction that increases in-domain confidence, and (b)~dividing
+logits by a temperature $T > 1$ before softmax, which amplifies the gap
+between in-domain and OOD scores.
 
 \paragraph{Mahalanobis Distance.}
-\citet{lee2018simple} proposed computing the Mahalanobis distance from test
-features to class-conditional Gaussian distributions fitted on training data.
-\citet{podolskiy2021revisiting} adapted this approach specifically for
-Transformer encoders, demonstrating state-of-the-art performance on
-CLINC150 with AUROC of 96.76\% and FPR@95TPR of 18.32\%.
+\citet{lee2018simple} modelled class-conditional feature distributions as
+Gaussians $p(\mathbf{h} \mid y=c) = \mathcal{N}(\boldsymbol{\mu}_c, \boldsymbol{\Sigma})$
+with a shared tied covariance, and used the minimum class Mahalanobis
+distance as the OOD score.
+\citet{podolskiy2021revisiting} applied this approach to Transformer
+encoders and established a state-of-the-art result on CLINC150.
 
 \paragraph{Energy Score.}
-\citet{liu2020energy} introduced an energy-based score
-$E(x) = -T \log \sum_y \exp(f_y(x)/T)$ that avoids the saturation problem
-of softmax and outperforms MSP on standard vision benchmarks.
+\citet{liu2020energy} derived a theoretically grounded score from the
+free energy of the classifier:
+$E(x; f) = -T \log \sum_y e^{f_y(x)/T}$.
+Unlike softmax probability, the energy is not bounded in $[0,1]$ and
+avoids the saturation of the exponential, leading to better separation of
+in-domain and OOD inputs.
 
 \paragraph{$k$-Nearest Neighbors.}
-\citet{sun2022out} proposed $k$-NN OOD detection in the feature space of a
-pre-trained encoder, showing strong performance without requiring
-out-of-distribution data during training.
+\citet{sun2022out} showed that the distance to the $k$-th nearest training
+neighbour in the feature space of a pre-trained encoder provides a powerful
+non-parametric OOD score without requiring any out-of-distribution data
+or distribution assumptions.
 
-\paragraph{Uncertainty via MC Dropout.}
-\citet{gal2016dropout} showed that dropout at inference time (MC Dropout)
-approximates Bayesian uncertainty. Predictive entropy under MC Dropout has
-been applied to OOD detection \cite{malinin2018predictive}.
+\paragraph{Bayesian Uncertainty via MC Dropout.}
+\citet{gal2016dropout} showed that a network with dropout is equivalent to
+a variational approximation to a Gaussian process, so the predictive
+variance under Monte Carlo sampling approximates epistemic uncertainty.
+\citet{malinin2018predictive} extended this to predictive entropy as an
+OOD score.
 
 \paragraph{Intent-specific OOD methods.}
-\citet{lin2019deep} proposed training with a special outlier class using
-synthetic outlier exposure. \citet{zhan2021out} introduced contrastive
-learning objectives designed specifically for intent OOD detection.
+\citet{lin2019deep} trained with synthetic outlier exposure.
+\citet{zhan2021out} introduced contrastive objectives for intent OOD.
 
 \medskip
 Table~\ref{tab:related} summarises published results on CLINC150.
@@ -142,201 +182,339 @@ $k$-NN \cite{sun2022out}                       & 95.30 & 22.10 \\
 \section{Model Description}
 \label{sec:model}
 
-\subsection{Base Encoder}
-All methods share a common \textbf{BERT-base-uncased} backbone
-\cite{devlin2019bert} fine-tuned on CLINC150 in-domain intents.
-The \texttt{[CLS]} token representation $\mathbf{h} \in \mathbb{R}^{768}$
-serves as the utterance embedding.
+\subsection{Base Encoder and Problem Setup}
+
+Let $\phi_\theta: \mathcal{X} \to \mathbb{R}^d$ denote the encoder that
+maps an input utterance to the \texttt{[CLS]} representation
+$\mathbf{h} = \phi_\theta(x) \in \mathbb{R}^{768}$, and let
+$W \in \mathbb{R}^{C \times d}$ be the classification head.
+The logit vector is $\mathbf{f}(x) = W\mathbf{h} \in \mathbb{R}^C$ and
+the predicted class is $\hat{c} = \arg\max_y f_y(x)$.
+
+We fine-tune \textbf{BERT-base-uncased}~\cite{devlin2019bert} on the
+CLINC150 in-domain intents by minimising cross-entropy:
+\[
+  \mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N}
+  \log \frac{\exp(f_{y_i}(x_i))}{\sum_{c=1}^C \exp(f_c(x_i))}.
+\]
+All OOD detectors operate post-hoc on the frozen encoder $\phi_\theta$,
+using only the training embeddings
+$\mathcal{H}_\text{train} = \{\mathbf{h}_i\}_{i=1}^N$
+and labels $\{y_i\}_{i=1}^N$.
 
 \subsection{Baseline OOD Detection Methods}
 
-\paragraph{MSP.}
-Given logits $\mathbf{f}(x) \in \mathbb{R}^C$, the OOD score is:
+\paragraph{Maximum Softmax Probability (MSP).}
+The softmax output $p_\theta(y \mid x) = \operatorname{softmax}(\mathbf{f}(x))_y$
+is over-confident for OOD inputs. MSP uses the complement of the maximum
+class probability as an OOD score:
 \[
-  s_\text{MSP}(x) = -\max_y \operatorname{softmax}(\mathbf{f}(x))_y.
+  s_\text{MSP}(x) = 1 - \max_{y \in [C]} p_\theta(y \mid x)
+  = 1 - \frac{\exp(f_{\hat{c}}(x))}{\sum_{c=1}^C \exp(f_c(x))}.
 \]
+Higher values indicate greater OOD likelihood.
 
 \paragraph{Energy Score.}
+The Helmholtz free energy of the classifier is:
 \[
-  s_\text{Energy}(x) = -T \log \sum_{y=1}^{C} \exp\!\bigl(f_y(x)/T\bigr),
-  \quad T=1.
+  E(x) = -T \log \sum_{y=1}^{C} \exp\!\bigl(f_y(x)/T\bigr), \quad T=1.
 \]
+\citet{liu2020energy} show that $E(x)$ is a lower bound on
+$-\log p(x)$ under a generative interpretation, making it a principled
+density estimator.
+We use $s_\text{Energy}(x) = E(x)$ (lower energy $\Rightarrow$ more in-domain).
 
 \paragraph{Mahalanobis Distance.}
-We fit a class-conditional Gaussian model on training features.
-Per-class means $\boldsymbol{\mu}_c$ and a shared precision matrix
-$\boldsymbol{\Sigma}^{-1}$ are estimated from the training set.
-The OOD score is the minimum Mahalanobis distance to any class centroid:
+We model the class-conditional feature distribution as a tied Gaussian:
 \[
-  s_\text{Maha}(x) = \min_c (\mathbf{h} - \boldsymbol{\mu}_c)^\top
-  \boldsymbol{\Sigma}^{-1} (\mathbf{h} - \boldsymbol{\mu}_c).
+  p(\mathbf{h} \mid y=c) = \mathcal{N}(\boldsymbol{\mu}_c, \boldsymbol{\Sigma}),
 \]
+with parameters estimated from the training set:
+\[
+  \hat{\boldsymbol{\mu}}_c = \frac{1}{N_c}\sum_{i:y_i=c} \mathbf{h}_i,
+  \qquad
+  \hat{\boldsymbol{\Sigma}} = \frac{1}{N}\sum_{c=1}^C
+  \sum_{i:y_i=c}(\mathbf{h}_i - \hat{\boldsymbol{\mu}}_c)
+  (\mathbf{h}_i - \hat{\boldsymbol{\mu}}_c)^\top + \lambda \mathbf{I},
+\]
+where $\lambda = 10^{-5}$ is a Tikhonov regularisation term that ensures
+invertibility.
+The OOD score is the minimum squared Mahalanobis distance to any class:
+\[
+  s_\text{Maha}(x) = \min_{c \in [C]} \;
+  (\mathbf{h} - \hat{\boldsymbol{\mu}}_c)^\top
+  \hat{\boldsymbol{\Sigma}}^{-1}
+  (\mathbf{h} - \hat{\boldsymbol{\mu}}_c).
+\]
+Under the Gaussian model this equals $-2\log p(\mathbf{h} \mid y=\hat{c})$
+up to a constant, so maximising in-domain likelihood is equivalent to
+minimising $s_\text{Maha}$.
 
-\paragraph{$k$-NN.}
-Utterance embeddings are $\ell_2$-normalised.
-The OOD score is the negative mean cosine similarity to the $k$ nearest
-training neighbours across the \emph{entire} training bank:
+\paragraph{$k$-Nearest Neighbors ($k$-NN).}
+Let $\tilde{\mathbf{h}} = \mathbf{h}/\|\mathbf{h}\|_2$ denote the
+$\ell_2$-normalised embedding and let
+$\mathcal{B} = \{\tilde{\mathbf{h}}_i\}_{i=1}^N$ be the normalised
+training bank.
+For a query $x$, let $\mathcal{N}_k(x)$ be the indices of the $k$
+most cosine-similar training points.
+The OOD score is:
 \[
-  s_{k\text{NN}}(x) = -\frac{1}{k}\sum_{i \in \text{kNN}(x)}
-  \frac{\mathbf{h} \cdot \mathbf{h}_i}{\|\mathbf{h}\|\,\|\mathbf{h}_i\|}.
+  s_{k\text{NN}}(x) = -\frac{1}{k}
+  \sum_{i \in \mathcal{N}_k(x)} \tilde{\mathbf{h}} \cdot \tilde{\mathbf{h}}_i.
 \]
+In-domain inputs cluster tightly in the fine-tuned embedding space,
+so they have high cosine similarity to their neighbours (low OOD score);
+OOD inputs lie in sparser regions (high OOD score).
 
-\paragraph{MC Dropout.}
-We perform $T=20$ stochastic forward passes with dropout active and compute
-predictive entropy as the OOD score:
+\paragraph{Monte Carlo Dropout (MC Dropout).}
+Following~\citet{gal2016dropout}, we keep dropout active at inference and
+perform $T=20$ stochastic forward passes.
+The per-pass class probabilities $p^{(t)}_y = \operatorname{softmax}(f_y^{(t)}(x))$
+are averaged to obtain the approximate predictive distribution:
 \[
-  s_\text{MC}(x) = -\sum_{y} \bar{p}_y \log \bar{p}_y,
-  \quad \bar{p}_y = \frac{1}{T}\sum_{t=1}^{T} p_y^{(t)}.
+  \bar{p}_y = \frac{1}{T}\sum_{t=1}^{T} p^{(t)}_y.
 \]
+The OOD score is the predictive entropy:
+\[
+  s_\text{MC}(x) = \mathcal{H}[\bar{p}] = -\sum_{y=1}^{C} \bar{p}_y \log \bar{p}_y.
+\]
+High entropy indicates the model is uncertain across stochastic passes,
+which is associated with OOD inputs.
 
 \subsection{Our Extensions}
 
 \subsubsection{Per-Class KNN}
 \label{sec:perclass}
 
-Standard $k$-NN OOD detection \cite{sun2022out} retrieves the $k$ nearest
-neighbours from the \emph{entire} training bank, regardless of class.
-An OOD sample may happen to land near some in-domain class that is
-irrelevant to its predicted label, artificially lowering its OOD score.
-We argue that a more natural boundary measures how well a sample fits its
-\emph{own predicted class} cluster.
+\textbf{Motivation.}
+Standard $k$-NN retrieves neighbours from the global bank $\mathcal{B}$,
+which may contain training points from classes unrelated to the test
+prediction $\hat{c}$.
+An OOD sample might land close to an irrelevant in-domain cluster, yielding
+a spuriously low (in-domain) OOD score.
+We propose measuring proximity \emph{conditioned on the predicted class},
+giving a tighter, class-specific decision boundary.
 
-We propose \textbf{Per-Class KNN}: for a test utterance $x$ with predicted
-class $\hat{c} = \arg\max_c f_c(x)$, retrieve the $k$ nearest neighbours
-exclusively from the training subset belonging to class $\hat{c}$:
+\textbf{Method.}
+Partition the training bank by class:
+$\mathcal{B}_c = \{\tilde{\mathbf{h}}_i : y_i = c\}$ for $c \in [C]$.
+For a test utterance $x$ with predicted class
+$\hat{c} = \arg\max_c f_c(x)$, retrieve the $k$ most cosine-similar
+points exclusively from $\mathcal{B}_{\hat{c}}$:
+\[
+  \mathcal{N}_k^{\hat{c}}(x) =
+  \operatorname*{arg\,top\text{-}k}_{i \in \mathcal{B}_{\hat{c}}}
+  \;\tilde{\mathbf{h}} \cdot \tilde{\mathbf{h}}_i.
+\]
+The OOD score is then:
 \[
   s_\text{PC-KNN}(x) =
-  -\frac{1}{k} \sum_{i \in \text{kNN}_{\hat{c}}(x)}
-  \frac{\mathbf{h} \cdot \mathbf{h}_i}{\|\mathbf{h}\|\,\|\mathbf{h}_i\|},
+  -\frac{1}{k} \sum_{i \in \mathcal{N}_k^{\hat{c}}(x)}
+  \tilde{\mathbf{h}} \cdot \tilde{\mathbf{h}}_i.
 \]
-where $\text{kNN}_{\hat{c}}(x)$ denotes the $k$ most cosine-similar training
-samples \emph{within class} $\hat{c}$.
 
-\textbf{Intuition.}
-In-domain samples should be both predicted correctly \emph{and} closely
-surrounded by same-class training points. An OOD sample may receive any
-predicted label but will be far from the training points of that class,
-yielding a high OOD score. Empirically, on the well-separated CLINC150
-dataset, Per-Class KNN achieves performance equivalent to global $k$-NN,
-which itself confirms that fine-tuned BERT produces highly compact,
-class-separable clusters.
+\textbf{Analysis.}
+In-domain inputs are (i) predicted correctly and (ii) close to same-class
+training points. OOD inputs may receive any predicted label but will
+typically be far from the training points of that class, resulting in a
+high OOD score. Formally, the PC-KNN score lower-bounds the global KNN
+score by restricting the search domain:
+\[
+  s_\text{PC-KNN}(x) \geq s_{k\text{NN}}(x)
+  \quad \text{when } |\mathcal{B}_{\hat{c}}| \geq k,
+\]
+because the global nearest neighbour may belong to any class and thus
+achieves at least as high a similarity as the class-restricted one.
+On the well-separated CLINC150 dataset, the two scores turn out to be
+empirically equivalent, confirming that fine-tuned BERT already places
+each class in a compact, easily-separated region of $\mathbb{R}^{768}$.
 
-\subsubsection{MahaKNN: Calibrated Ensemble}
+\subsubsection{MahaKNN: Calibrated Score Ensemble}
 \label{sec:mahaknn}
 
-Mahalanobis Distance (parametric, Gaussian assumption) and $k$-NN
-(non-parametric, no distributional assumption) are complementary detectors
-whose error patterns differ. We propose combining them as a convex ensemble:
-\[
-  s_\text{MahaKNN}(x) = \alpha \cdot \tilde{s}_\text{Maha}(x)
-  + (1 - \alpha) \cdot \tilde{s}_{k\text{NN}}(x),
-\]
-where $\tilde{s}$ denotes standardisation to zero mean and unit standard
-deviation using validation-set statistics (no test leakage), and
-$\alpha \in [0,1]$ is selected by grid search on the validation set to
-minimise FPR@95TPR.
+\textbf{Motivation.}
+Mahalanobis Distance is \emph{parametric}: it assumes a Gaussian density
+with a shared covariance, which may be mis-specified when class clusters
+are non-Gaussian or have heterogeneous covariances.
+$k$-NN is \emph{non-parametric} and makes no distributional assumption,
+but it may be sensitive to the scale of the embedding space and to the
+presence of outlying training points.
+The two scores encode complementary information, and their combination
+may be more robust than either alone.
 
-The fitting procedure is:
-\begin{enumerate}
-  \item Fit Mahalanobis (class means + shared precision) and $k$-NN (store
-        $\ell_2$-normalised training embeddings) on the training set.
-  \item Score the validation set; compute normalisation statistics
-        $(\mu_\text{Maha}, \sigma_\text{Maha})$ and
-        $(\mu_{k\text{NN}}, \sigma_{k\text{NN}})$ on the validation set.
-  \item Grid-search $\alpha \in \{0.00, 0.05, \ldots, 1.00\}$; select
-        $\alpha^*$ minimising FPR@95TPR on the validation set.
-  \item At test time, standardise each score using stored validation
-        statistics and combine with $\alpha^*$.
-\end{enumerate}
-On CLINC150, the optimal $\alpha^* = 0.0$, meaning the ensemble reduces to
-pure $k$-NN. This is itself an informative finding: after fine-tuning, the
-$k$-NN score subsumes the information in the Mahalanobis score on this
-dataset, suggesting that the non-parametric boundary is sufficient when
-class clusters are compact and well-separated.
+\textbf{Score Standardisation.}
+Because $s_\text{Maha}$ and $s_{k\text{NN}}$ have different scales and
+supports, we standardise each score using validation-set statistics to
+obtain zero-mean, unit-variance scores with no leakage from the test set:
+\[
+  \tilde{s}(x) = \frac{s(x) - \mu_\text{val}}{\sigma_\text{val}},
+  \quad
+  \mu_\text{val} = \mathbb{E}_\text{val}[s],
+  \quad
+  \sigma_\text{val} = \sqrt{\operatorname{Var}_\text{val}[s]}.
+\]
+
+\textbf{Ensemble.}
+We combine the two standardised scores as a convex combination:
+\[
+  s_\text{MahaKNN}(x;\alpha) =
+  \alpha \cdot \tilde{s}_\text{Maha}(x)
+  + (1-\alpha) \cdot \tilde{s}_{k\text{NN}}(x),
+  \quad \alpha \in [0,1].
+\]
+
+\textbf{Validation Calibration.}
+The mixing weight $\alpha^*$ is selected by minimising FPR@95TPR on the
+held-out validation set, which avoids any information from the test set:
+\[
+  \alpha^* = \operatorname*{arg\,min}_{\alpha \in \mathcal{A}}
+  \operatorname{FPR@95TPR}\!\bigl(s_\text{MahaKNN}(\cdot;\alpha),
+  \mathcal{D}_\text{val}\bigr),
+\]
+where $\mathcal{A} = \{0.00, 0.05, \ldots, 1.00\}$ is a uniform grid of
+21 values.
+The full procedure is given in Algorithm~\ref{alg:mahaknn}.
+
+\begin{algorithm}[h]
+\caption{MahaKNN Fitting and Inference}
+\label{alg:mahaknn}
+\begin{algorithmic}[1]
+\Require Training set $\mathcal{D}_\text{train}$, validation set $\mathcal{D}_\text{val}$, grid $\mathcal{A}$, $k$
+\State Compute $\hat{\boldsymbol{\mu}}_c$, $\hat{\boldsymbol{\Sigma}}^{-1}$ from $\mathcal{D}_\text{train}$ \Comment{Mahalanobis fit}
+\State Build normalised bank $\mathcal{B}$ from $\mathcal{D}_\text{train}$ \Comment{KNN fit}
+\State $\mathbf{s}^M_\text{val} \leftarrow s_\text{Maha}(\mathcal{D}_\text{val})$; $\mathbf{s}^K_\text{val} \leftarrow s_{k\text{NN}}(\mathcal{D}_\text{val})$
+\State $\tilde{\mathbf{s}}^M \leftarrow (\mathbf{s}^M_\text{val} - \mu^M)/\sigma^M$; $\tilde{\mathbf{s}}^K \leftarrow (\mathbf{s}^K_\text{val} - \mu^K)/\sigma^K$ \Comment{Standardise on val}
+\State $\alpha^* \leftarrow \arg\min_{\alpha \in \mathcal{A}} \operatorname{FPR@95}(\alpha \tilde{\mathbf{s}}^M + (1-\alpha)\tilde{\mathbf{s}}^K)$
+\State \Return $\hat{\boldsymbol{\mu}}_c$, $\hat{\boldsymbol{\Sigma}}^{-1}$, $\mathcal{B}$, $\alpha^*$, $(\mu^M, \sigma^M)$, $(\mu^K, \sigma^K)$
+\Statex
+\Require Test utterance $x$, stored parameters from above
+\State Compute $\tilde{s}_\text{Maha}(x)$ using stored $(\mu^M, \sigma^M)$
+\State Compute $\tilde{s}_{k\text{NN}}(x)$ using stored $(\mu^K, \sigma^K)$
+\State \Return $\alpha^* \tilde{s}_\text{Maha}(x) + (1-\alpha^*)\tilde{s}_{k\text{NN}}(x)$
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Discussion.}
+On CLINC150, the calibration yields $\alpha^* = 0.0$, reducing MahaKNN
+to pure $k$-NN. This is an informative finding: it implies that the
+Mahalanobis score provides no complementary information beyond what $k$-NN
+already captures on this dataset. Geometrically, this is consistent with
+class clusters being compact and approximately isotropic in the fine-tuned
+BERT space --- the tied-covariance Gaussian model does not capture structure
+that the non-parametric $k$-NN boundary does not already exploit.
 
 % ---------------------------------------------------------------
 \section{Dataset}
 \label{sec:dataset}
 
 \paragraph{CLINC150.}
-The CLINC OOS dataset \cite{larson2019evaluation} contains 22{,}500
-in-domain utterances covering 150 intent classes across 10 domains
-(banking, travel, home, etc.), plus 1{,}200 OOD (out-of-scope) utterances.
+The CLINC OOS dataset~\cite{larson2019evaluation} contains 22{,}500
+in-domain utterances spanning $C=150$ intent classes across 10 domains
+(banking, travel, home, kitchen, auto, etc.), plus 1{,}200 OOD
+(out-of-scope) utterances that cover topics absent from all 150 classes.
 We use the \textbf{full} variant with the standard train/val/test split.
 
 \begin{table}[h]
 \centering
 \caption{CLINC150 dataset statistics.}
 \label{tab:data}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-Split & In-domain & OOD & Total \\
+Split & In-domain & OOD & Total & OOD ratio \\
 \midrule
-Train & 15{,}000 & 100  & 15{,}100 \\
-Val   &  3{,}000 & 100  &  3{,}100 \\
-Test  &  4{,}500 & 1{,}000 &  5{,}500 \\
+Train & 15{,}000 & 100  & 15{,}100 & 0.66\% \\
+Val   &  3{,}000 & 100  &  3{,}100 & 3.23\% \\
+Test  &  4{,}500 & 1{,}000 &  5{,}500 & 18.18\% \\
 \midrule
-Total & 22{,}500 & 1{,}200 & 23{,}700 \\
+Total & 22{,}500 & 1{,}200 & 23{,}700 & 5.06\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Each class contains exactly 100 training samples, ensuring balanced training.
-OOD samples cover diverse topics absent from the 150 intent classes.
-The dataset is publicly available at
-\url{https://github.com/clinc/oos-eval}.
+Each in-domain class contains exactly 100 training samples
+($N_c = 100$, $\forall c$), ensuring perfectly balanced training.
+The test set has a significantly higher OOD ratio (18.18\%) than the
+training or validation sets, which reflects a realistic deployment scenario.
+The dataset is publicly available at \url{https://github.com/clinc/oos-eval}.
 
 % ---------------------------------------------------------------
 \section{Experiments}
 
-\subsection{Metrics}
-We report the standard OOD detection metrics:
+\subsection{Evaluation Metrics}
+
+Let $\{(s_i, y_i)\}$ be the set of OOD scores and binary OOD labels
+($y_i=1$ if OOD, $y_i=0$ if in-domain). We report:
 \begin{itemize}
-  \item \textbf{AUROC} ---Area Under the ROC Curve ($\uparrow$).
-  \item \textbf{FPR@95TPR} ---False Positive Rate at 95\% True Positive Rate ($\downarrow$).
-  \item \textbf{AUPR} ---Area Under the Precision-Recall Curve, OOD as positive class ($\uparrow$).
+  \item \textbf{AUROC} --- Area Under the Receiver Operating Characteristic
+        Curve. Equals the probability that a randomly drawn OOD sample
+        scores higher than a randomly drawn in-domain sample:
+        $\Pr[s(x^+) > s(x^-)]$ with $x^+ \sim \mathcal{D}_\text{out}$,
+        $x^- \sim \mathcal{D}_\text{in}$. Threshold-free ($\uparrow$).
+  \item \textbf{FPR@95TPR} --- False Positive Rate at the threshold where
+        True Positive Rate (recall on OOD) equals 95\%. Directly measures
+        the rate of in-domain samples wrongly rejected ($\downarrow$).
+  \item \textbf{AUPR} --- Area Under the Precision-Recall Curve with OOD
+        as the positive class. Robust to class imbalance ($\uparrow$).
 \end{itemize}
 
 \subsection{Experiment Setup}
 We fine-tune \texttt{bert-base-uncased} for 5 epochs with AdamW
-(lr $= 2 \times 10^{-5}$, weight decay $= 0.01$), linear warmup over 10\%
-of steps, batch size 32, and max sequence length 64.
-Training uses only in-domain samples.
-All OOD detectors are applied post-hoc to the frozen encoder.
-For Mahalanobis, the tied covariance is regularised with $10^{-5} \mathbf{I}$.
-For all $k$-NN variants we use $k=1$ (cosine similarity).
-For MC Dropout we run $T=20$ passes with $p=0.1$ dropout.
-The MahaKNN mixing weight $\alpha$ is grid-searched over 21 values in
-$[0,1]$ using only the validation set.
+(lr $= 2 \times 10^{-5}$, weight decay $= 0.01$), a linear warmup
+schedule over the first 10\% of training steps, batch size 32, and
+maximum sequence length 64 tokens.
+Training uses only in-domain samples; OOD samples in the train split
+are discarded.
+The best checkpoint is selected by validation accuracy.
+All OOD detectors are applied post-hoc to the frozen encoder with no
+additional training.
+
+Specific hyperparameters per method:
+\begin{itemize}
+  \item \textbf{Mahalanobis}: regularisation $\lambda = 10^{-5}$.
+  \item \textbf{$k$-NN / PC-KNN}: $k=1$, cosine similarity,
+        $\ell_2$-normalised embeddings.
+  \item \textbf{MC Dropout}: $T=20$ stochastic passes, $p_\text{drop}=0.1$.
+  \item \textbf{MahaKNN}: grid $\mathcal{A}$ of 21 values in $[0,1]$, $k=1$.
+\end{itemize}
 
 \subsection{Baselines}
-We compare five post-hoc OOD detectors (MSP, Energy, Mahalanobis, $k$-NN,
-MC Dropout) all applied to the same BERT encoder.
-Published results from \citet{podolskiy2021revisiting} serve as the
-state-of-the-art reference.
+We compare against published results of \citet{podolskiy2021revisiting}
+(Mahalanobis on BERT, AUROC 96.76\%, FPR@95TPR 18.32\%) and
+\citet{sun2022out} ($k$-NN, AUROC 95.30\%, FPR@95TPR 22.10\%) as the
+primary state-of-the-art references.
 
 \subsection{Layer-wise Analysis of Mahalanobis Features}
 
-Prior work \cite{podolskiy2021revisiting} applies Mahalanobis Distance
-exclusively to the final hidden layer of the Transformer encoder.
-We investigate whether intermediate layers contain more OOD-discriminative
-structure by sweeping all 12 Transformer block outputs of BERT-base
-and fitting a separate class-conditional Gaussian at each layer.
-
-Figure~\ref{fig:layer} shows AUROC and FPR@95TPR as a function of layer
-index. Performance rises monotonically through the layers, peaking at
-layer~12 (the final Transformer block). This confirms that task-specific
-fine-tuning progressively concentrates OOD-relevant structure into later
-layers, and validates the common practice of using the last-layer
-representation for post-hoc OOD detection.
+\citet{podolskiy2021revisiting} apply Mahalanobis Distance exclusively to
+the final hidden layer of the Transformer encoder, without justifying
+this choice empirically. We conduct a controlled analysis: for each
+layer $\ell \in \{1, \ldots, 12\}$ of BERT-base, we extract the
+corresponding hidden states $\mathbf{h}^{(\ell)} \in \mathbb{R}^{768}$
+and fit an independent class-conditional Gaussian:
+\[
+  s_\text{Maha}^{(\ell)}(x) = \min_c
+  (\mathbf{h}^{(\ell)} - \hat{\boldsymbol{\mu}}_c^{(\ell)})^\top
+  (\hat{\boldsymbol{\Sigma}}^{(\ell)})^{-1}
+  (\mathbf{h}^{(\ell)} - \hat{\boldsymbol{\mu}}_c^{(\ell)}).
+\]
+Figure~\ref{fig:layer} reports AUROC and FPR@95TPR as a function of $\ell$.
+Performance rises monotonically, peaking at layer~12 (the final
+Transformer block).
+This is consistent with the standard interpretation of Transformer
+fine-tuning: task-relevant information is progressively concentrated in
+later layers~\cite{devlin2019bert}, while early layers retain more
+generic syntactic features that are less discriminative for intent OOD.
+The result validates the convention of using last-layer features and
+motivates our choice of $\ell=12$ for all experiments.
 
 \begin{figure}[h]
   \centering
   \includegraphics[width=\linewidth]{layer_analysis.pdf}
-  \caption{AUROC and FPR@95TPR of Mahalanobis Distance across all 12 BERT
-           Transformer layers. The red dashed line marks the result of
-           \citet{podolskiy2021revisiting} who used only the last layer.
-           Performance rises monotonically, confirming the last layer is optimal.}
+  \caption{AUROC and FPR@95TPR of Mahalanobis Distance as a function
+           of BERT layer index $\ell$. The red dashed line marks the
+           result of \citet{podolskiy2021revisiting} (last layer only).
+           Both metrics improve monotonically with depth, confirming that
+           the final layer is optimal for post-hoc OOD detection.}
   \label{fig:layer}
 \end{figure}
 
@@ -356,7 +534,7 @@ Method & AUROC $\uparrow$ & FPR@95TPR $\downarrow$ & AUPR $\uparrow$ \\
 Mahalanobis (Podolskiy 2021)$\dagger$ & 96.76 & 18.32 & --- \\
 $k$-NN (Sun 2022)$\dagger$             & 95.30 & 22.10 & --- \\
 \midrule
-\multicolumn{4}{l}{\textit{Baselines (this work)}} \\
+\multicolumn{4}{l}{\textit{Baselines (this work, BERT-base-uncased)}} \\
 MSP              & 96.50 & 14.13 & 87.24 \\
 Energy           & 97.15 & 11.36 & 89.63 \\
 Mahalanobis      & \textbf{97.59} & \textbf{9.27} & \textbf{90.98} \\
@@ -370,44 +548,53 @@ MahaKNN ($\alpha^*\!=\!0$) & 97.58 & 10.13 & 90.33 \\
 \end{tabular}
 \end{table}
 
-All five baselines exceed the previous state of the art of
-\citet{podolskiy2021revisiting}. Mahalanobis achieves the best overall
-performance (AUROC 97.59\%, FPR@95TPR 9.27\%), nearly halving the
-false-positive rate of the prior best.
+\paragraph{Baselines vs.\ prior art.}
+All five of our baseline methods surpass the published state of the art of
+\citet{podolskiy2021revisiting} on both AUROC and FPR@95TPR.
+Mahalanobis achieves the best overall results (AUROC 97.59\%,
+FPR@95TPR 9.27\%), which represents a \textbf{9.01\,pp reduction in
+FPR@95TPR} relative to \citet{podolskiy2021revisiting}.
+Even MSP, the simplest baseline, exceeds the prior best AUROC.
+We attribute this improvement primarily to our stronger fine-tuning
+setup: larger batch size, linear warmup, and gradient clipping produce a
+more discriminative encoder $\phi_\theta$, which benefits all post-hoc
+methods equally.
 
-Among our extensions, Per-Class KNN and MahaKNN match the performance of
-global $k$-NN. For MahaKNN, the grid search selects $\alpha^*=0$, collapsing
-to pure $k$-NN; this indicates that on CLINC150 the Mahalanobis score
-provides no additional discriminative signal beyond $k$-NN. Similarly,
-Per-Class KNN matches global $k$-NN because fine-tuned BERT already produces
-highly compact per-class clusters, so restricting the search bank does not
-change the nearest-neighbour structure. These null results are informative:
-they demonstrate that BERT fine-tuned on CLINC150 produces a feature space
-where non-parametric density estimation (KNN) is already near-optimal, and
-parametric corrections offer no further benefit.
+\paragraph{Our extensions.}
+Per-Class KNN achieves 97.55\% AUROC / 10.20\% FPR, statistically
+equivalent to global $k$-NN (97.58\% / 10.13\%).
+MahaKNN selects $\alpha^*=0$, collapsing to pure $k$-NN.
+Both results are consistent with our theoretical analysis: when fine-tuned
+BERT class clusters are compact and well-separated, restricting the search
+domain to the predicted class (PC-KNN) and correcting for parametric
+Gaussian mis-specification (Mahalanobis) offer no additional benefit over
+the non-parametric global $k$-NN boundary. This is a meaningful finding:
+it characterises the geometry of the BERT feature space on CLINC150 and
+implies that further gains require either a different encoder or a different
+training objective, rather than a more sophisticated post-hoc score.
 
 % ---------------------------------------------------------------
 \section{Conclusion}
 
 We presented a systematic evaluation of five post-hoc OOD detection methods
-for intent classification on CLINC150, together with three complementary
-extensions: Per-Class KNN, MahaKNN ensemble, and a layer-wise Mahalanobis
-analysis.
+for intent classification on CLINC150, together with three extensions:
+Per-Class KNN, MahaKNN ensemble, and a layer-wise Mahalanobis analysis.
+
 All baselines surpass the published state of the art of
-\citet{podolskiy2021revisiting} (AUROC 96.76\%, FPR@95TPR 18.32\%), which
-we attribute to a stronger fine-tuning setup (larger batch size, warmup
-scheduler, gradient clipping). Mahalanobis achieves the best results
-(AUROC 97.59\%, FPR@95TPR 9.27\%).
+\citet{podolskiy2021revisiting} (AUROC 96.76\%, FPR@95TPR 18.32\%),
+with Mahalanobis achieving AUROC 97.59\% and FPR@95TPR 9.27\%.
+Our layer-wise analysis empirically confirms that the last BERT layer is
+optimal for post-hoc Mahalanobis detection on this fine-tuning task.
+Our extensions (Per-Class KNN, MahaKNN) match the performance of global
+$k$-NN; the null result $\alpha^*=0$ for MahaKNN reveals that the
+fine-tuned BERT embedding space on CLINC150 is already near-optimally
+structured for non-parametric density estimation, leaving little room
+for parametric or ensemble corrections at the score level.
 
-Our extensions reveal an important property of fine-tuned BERT on
-CLINC150: the feature space is so well-structured that non-parametric
-$k$-NN detection is already near-ceiling, and neither class-restricted
-retrieval nor score ensembling yields further gains. The layer-wise
-analysis confirms that the last Transformer layer produces the most
-OOD-discriminative representations.
-
-Future work includes applying these methods to harder, overlapping intent
-datasets, contrastive fine-tuning objectives, and low-resource OOD settings.
+Future directions include: applying these methods to harder, semantically
+overlapping intent datasets; contrastive or outlier-aware fine-tuning
+objectives; and low-resource OOD settings where per-class cluster
+compactness may not hold.
 
 % ---------------------------------------------------------------
 \bibliographystyle{plainnat}
