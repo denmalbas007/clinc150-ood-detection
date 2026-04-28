@@ -1,5 +1,7 @@
 # Out-of-Domain Detection for Intent Classification on CLINC150
 
+> 🏆 **Best Paper Award 2026** — this paper and repository received the Best Paper Award 2026 at the [AINL 2026 conference](https://ainlconf.ru/).
+
 This repository contains code for the NLP course project on OOD detection for intent classification using the CLINC150 dataset.
 
 ## Task
